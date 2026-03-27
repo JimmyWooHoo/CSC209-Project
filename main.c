@@ -17,6 +17,7 @@ static void free_filenames(char **filenames, int count) {
 }
 
 static void merge_child_results(Node **global_list, const char *buffer) {
+	// Parse one child's "word count" lines and fold them into the global list.
 	char *copy = malloc(strlen(buffer) + 1);
 	if (copy == NULL) {
 		perror("malloc");
@@ -53,6 +54,7 @@ static void merge_child_results(Node **global_list, const char *buffer) {
 }
 
 static char *read_from_pipe(int fd) {
+	// Grow the buffer as needed so one child can send back any amount of text.
 	size_t capacity = READ_CHUNK + 1;
 	size_t used = 0;
 	char *buffer = malloc(capacity);
@@ -73,6 +75,7 @@ static char *read_from_pipe(int fd) {
 		}
 
 		used += (size_t) bytes_read;
+		// Double the buffer once it fills up to keep reads simple.
 		if (used == capacity - 1) {
 			capacity *= 2;
 			char *grown = realloc(buffer, capacity);
@@ -90,13 +93,14 @@ static char *read_from_pipe(int fd) {
 }
 
 int main(int argc, char **argv) {
+	// Declare any new variables you need
 	if (argc < 2) {
 		fprintf(stderr, "Usage: %s <file list>\n", argv[0]);
 		exit(1);
 	}
 
 	FILE *files = fopen(argv[1], "r");
-	// Open the file containing the list of input filenames.
+	// open file and error check
 	if (files == NULL) {
 		perror("fopen");
 		exit(1);
@@ -104,6 +108,7 @@ int main(int argc, char **argv) {
 
 	char line[LINE_LENGTH + 1];
 	int len = 0;
+	// find the number of filenames are given
 	while (fgets(line, LINE_LENGTH + 1, files) != NULL) {
 		len++;
 	}
@@ -144,7 +149,8 @@ int main(int argc, char **argv) {
 	int fd[len][2];
 	pid_t child_pids[len];
 
-	// Each child gets one pipe back to the parent for its local counts.
+	// then call pipe, and then fork so all children have this array as well
+	// child writes to the pipe, parent reads from the pipe
 	for (int j = 0; j < len; j++) {
 		if (pipe(fd[j]) == -1) {
 			perror("pipe");
@@ -158,12 +164,14 @@ int main(int argc, char **argv) {
 			free_filenames(filenames, len);
 			exit(1);
 		} else if (result == 0) {
+			// Child process only writes to the process, close reading end
 			close(fd[j][0]);
 			for (int k = 0; k < j; k++) {
 				close(fd[k][0]);
 				close(fd[k][1]);
 			}
 
+			// Now we can start making the word index for the child process
 			char **word_list = read_words(filenames[j]);
 			Node *node_list = generate_node_family(word_list);
 			if (node_list == NULL && word_list[0] != NULL) {
@@ -181,6 +189,7 @@ int main(int argc, char **argv) {
 				exit(1);
 			}
 
+			// Now we can send this word frequency to the parent process
 			if (write(fd[j][1], output, strlen(output)) == -1) {
 				perror("write");
 				free(output);
@@ -197,6 +206,8 @@ int main(int argc, char **argv) {
 			free_filenames(filenames, len);
 			exit(0);
 		} else {
+			// close the end of the pipe in the parent process
+			// we don't want open
 			child_pids[j] = result;
 			close(fd[j][1]);
 		}
@@ -212,6 +223,7 @@ int main(int argc, char **argv) {
 		free(buffer);
 	}
 
+	// Wait for every child so the parent does not leave zombie processes behind.
 	for (int j = 0; j < len; j++) {
 		int status;
 		if (waitpid(child_pids[j], &status, 0) == -1) {
@@ -228,6 +240,7 @@ int main(int argc, char **argv) {
 		}
 	}
 
+	// only the parent gets here, so print the final combined word counts
 	for (Node *curr = global_list; curr != NULL; curr = curr->next) {
 		printf("%s %d\n", curr->word, curr->count);
 	}

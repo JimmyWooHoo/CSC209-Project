@@ -17,6 +17,14 @@ int compare_alphabetical(const void *a, const void *b) {
 	return strcmp(nodeA->word, nodeB->word);
 }
 
+// function for reversed alphabetical sort
+int compare_alphabetical_reversed(const void *a, const void *b) {
+	Node *nodeA = *(Node**)a;
+	Node *nodeB = *(Node**)b;
+
+	return strcmp(nodeB->word, nodeA->word);
+}
+
 // function for high to low frequency sort
 int compare_frequency(const void *a, const void *b) {
 	Node *nodeA = *(Node**)a;
@@ -24,6 +32,17 @@ int compare_frequency(const void *a, const void *b) {
 
 	if (nodeA->count != nodeB->count) {
 		return nodeB->count - nodeA->count;
+	}
+	return strcmp(nodeA->word, nodeB->word);
+}
+
+// function for low to high frequency sort
+int compare_frequency_reversed(const void *a, const void *b) {
+	Node *nodeA = *(Node**)a;
+	Node *nodeB = *(Node**)b;
+
+	if (nodeA->count != nodeB->count) {
+		return nodeA->count - nodeB->count;
 	}
 	return strcmp(nodeA->word, nodeB->word);
 }
@@ -113,7 +132,7 @@ static char *read_from_pipe(int fd) {
 int main(int argc, char **argv) {
 	// Declare any new variables you need
 	if (argc < 2) {
-		fprintf(stderr, "Usage: %s [-f | -a] <file list>\n", argv[0]);
+		fprintf(stderr, "Usage: %s [-f | -a | -rf | -ra] <file list>\n", argv[0]);
 		exit(1);
 	}
 	int (*sort_func)(const void *, const void *) = compare_frequency;
@@ -122,9 +141,13 @@ int main(int argc, char **argv) {
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "-f") == 0) {
 			sort_func = compare_frequency;
+		} else if (strcmp(argv[i], "-rf") == 0) {
+			sort_func = compare_frequency_reversed;
 		} else if (strcmp(argv[i], "-a") == 0) {
 			sort_func = compare_alphabetical;
-		} else {
+		}else if (strcmp(argv[i], "-ra") == 0) {
+			sort_func = compare_alphabetical_reversed;
+		}else {
 			filename = argv[i];
 		}
 	}

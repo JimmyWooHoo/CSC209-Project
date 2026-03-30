@@ -9,6 +9,43 @@
 #define LINE_LENGTH 256
 #define READ_CHUNK 256
 
+// function for alphabetical sort
+int compare_alphabetical(const void *a, const void *b) {
+	Node *nodeA = *(Node**)a;
+	Node *nodeB = *(Node**)b;
+
+	return strcmp(nodeA->word, nodeB->word);
+}
+
+// function for reversed alphabetical sort
+int compare_alphabetical_reversed(const void *a, const void *b) {
+	Node *nodeA = *(Node**)a;
+	Node *nodeB = *(Node**)b;
+
+	return strcmp(nodeB->word, nodeA->word);
+}
+
+// function for high to low frequency sort
+int compare_frequency(const void *a, const void *b) {
+	Node *nodeA = *(Node**)a;
+	Node *nodeB = *(Node**)b;
+
+	if (nodeA->count != nodeB->count) {
+		return nodeB->count - nodeA->count;
+	}
+	return strcmp(nodeA->word, nodeB->word);
+}
+
+// function for low to high frequency sort
+int compare_frequency_reversed(const void *a, const void *b) {
+	Node *nodeA = *(Node**)a;
+	Node *nodeB = *(Node**)b;
+
+	if (nodeA->count != nodeB->count) {
+		return nodeA->count - nodeB->count;
+	}
+	return strcmp(nodeA->word, nodeB->word);
+}
 static void free_filenames(char **filenames, int count) {
 	for (int i = 0; i < count; i++) {
 		free(filenames[i]);
@@ -95,11 +132,32 @@ static char *read_from_pipe(int fd) {
 int main(int argc, char **argv) {
 	// Declare any new variables you need
 	if (argc < 2) {
-		fprintf(stderr, "Usage: %s <file list>\n", argv[0]);
+		fprintf(stderr, "Usage: %s [-f | -a | -rf | -ra] <file list>\n", argv[0]);
+		exit(1);
+	}
+	int (*sort_func)(const void *, const void *) = compare_frequency;
+	char *filename = NULL;
+
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "-f") == 0) {
+			sort_func = compare_frequency;
+		} else if (strcmp(argv[i], "-rf") == 0) {
+			sort_func = compare_frequency_reversed;
+		} else if (strcmp(argv[i], "-a") == 0) {
+			sort_func = compare_alphabetical;
+		}else if (strcmp(argv[i], "-ra") == 0) {
+			sort_func = compare_alphabetical_reversed;
+		}else {
+			filename = argv[i];
+		}
+	}
+
+	if (filename == NULL) {
+		fprintf(stderr, "Error: no file list provided.\n");
 		exit(1);
 	}
 
-	FILE *files = fopen(argv[1], "r");
+	FILE *files = fopen(filename, "r");
 	// open file and error check
 	if (files == NULL) {
 		perror("fopen");
@@ -168,7 +226,7 @@ int main(int argc, char **argv) {
 			close(fd[j][0]);
 			for (int k = 0; k < j; k++) {
 				close(fd[k][0]);
-				close(fd[k][1]);
+			//	close(fd[k][1]);
 			}
 
 			// Now we can start making the word index for the child process
@@ -240,10 +298,39 @@ int main(int argc, char **argv) {
 		}
 	}
 
+	// Sorting starts here
+	int num_words_distinct = 0;
+	for (Node* curr = global_list; curr != NULL; curr = curr->next) {
+		num_words_distinct++;
+	}
+
+	Node **node_array = malloc(sizeof(Node *) * num_words_distinct);
+	if (node_array == NULL) {
+		perror("malloc");
+		deallocate_nodes(global_list);
+		free_filenames(filenames, len);
+		exit(1);
+	}
+
+	int i = 0;
+	for (Node* curr = global_list; curr != NULL; curr = curr->next) {
+		node_array[i] = curr;
+		i++;
+	}
+	
+	qsort(node_array, num_words_distinct, sizeof(Node *), sort_func);
+
+	
+	for (int i = 0; i < num_words_distinct; i++) {
+		printf("%s %d\n", node_array[i]->word, node_array[i]->count);
+	}
+
+	/*
 	// only the parent gets here, so print the final combined word counts
 	for (Node *curr = global_list; curr != NULL; curr = curr->next) {
 		printf("%s %d\n", curr->word, curr->count);
 	}
+	*/
 
 	deallocate_nodes(global_list);
 	free_filenames(filenames, len);

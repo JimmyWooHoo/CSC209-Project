@@ -1,13 +1,15 @@
 #ifndef NODE_H
 #define NODE_H
 
+#include <stdbool.h>
+
 typedef struct node {
 	char word[80];
 	int count;
 	struct node *next;
 } Node;
 
-char **read_words(const char *filename);
+char **read_words(const char *filename, bool ignore_case);
 void deallocate_words(char **words);
 
 Node *new_node(const char *str);

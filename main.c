@@ -1,4 +1,7 @@
 #include <errno.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,7 +10,7 @@
 #include "node.h"
 
 #define LINE_LENGTH 256
-#define READ_CHUNK 256
+#define ERROR_PREFIX "__ERROR__ "
 
 // function for alphabetical sort
 int compare_alphabetical(const void *a, const void *b) {
@@ -90,53 +93,147 @@ static void merge_child_results(Node **global_list, const char *buffer) {
 	free(copy);
 }
 
-static char *read_from_pipe(int fd) {
-	// Grow the buffer as needed so one child can send back any amount of text.
-	size_t capacity = READ_CHUNK + 1;
-	size_t used = 0;
-	char *buffer = malloc(capacity);
+static bool write_all(int fd, const void *buffer, size_t count) {
+	const char *cursor = buffer;
+	size_t total_written = 0;
+
+	while (total_written < count) {
+		ssize_t bytes_written = write(fd, cursor + total_written, count - total_written);
+		if (bytes_written < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			return false;
+		}
+		total_written += (size_t)bytes_written;
+	}
+
+	return true;
+}
+
+static bool read_all(int fd, void *buffer, size_t count) {
+	char *cursor = buffer;
+	size_t total_read = 0;
+
+	while (total_read < count) {
+		ssize_t bytes_read = read(fd, cursor + total_read, count - total_read);
+		if (bytes_read < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			return false;
+		}
+		if (bytes_read == 0) {
+			return false;
+		}
+		total_read += (size_t)bytes_read;
+	}
+
+	return true;
+}
+
+static bool send_result_message(int fd, const char *payload) {
+	uint32_t payload_len = (uint32_t)strlen(payload);
+	return write_all(fd, &payload_len, sizeof(payload_len))
+		&& write_all(fd, payload, payload_len);
+}
+
+static void send_child_error_and_exit(int fd, const char *filename) {
+	char buffer[LINE_LENGTH + 128];
+	snprintf(buffer, sizeof(buffer), "%s%s: %s", ERROR_PREFIX, filename, strerror(errno));
+	if (!send_result_message(fd, buffer)) {
+		perror("write");
+	}
+	if (close(fd) == -1) {
+		perror("close");
+	}
+	exit(1);
+}
+
+static char *read_result_message(int fd) {
+	uint32_t payload_len;
+	if (!read_all(fd, &payload_len, sizeof(payload_len))) {
+		return NULL;
+	}
+
+	char *buffer = malloc((size_t)payload_len + 1);
 	if (buffer == NULL) {
 		perror("malloc");
 		exit(1);
 	}
 
-	while (1) {
-		ssize_t bytes_read = read(fd, buffer + used, capacity - used - 1);
-		if (bytes_read < 0) {
-			perror("read");
-			free(buffer);
-			exit(1);
-		}
-		if (bytes_read == 0) {
-			break;
-		}
-
-		used += (size_t) bytes_read;
-		// Double the buffer once it fills up to keep reads simple.
-		if (used == capacity - 1) {
-			capacity *= 2;
-			char *grown = realloc(buffer, capacity);
-			if (grown == NULL) {
-				perror("realloc");
-				free(buffer);
-				exit(1);
-			}
-			buffer = grown;
-		}
+	if (payload_len > 0 && !read_all(fd, buffer, payload_len)) {
+		free(buffer);
+		return NULL;
 	}
 
-	buffer[used] = '\0';
+	buffer[payload_len] = '\0';
 	return buffer;
+}
+
+static void close_pipe_pair(int pipe_fds[2]) {
+	if (close(pipe_fds[0]) == -1) {
+		perror("close");
+	}
+	if (close(pipe_fds[1]) == -1) {
+		perror("close");
+	}
+}
+
+static void close_child_pipe_ends(int pipes[][2], int initialized_count, int keep_index) {
+	for (int i = 0; i < initialized_count; i++) {
+		if (i == keep_index) {
+			if (close(pipes[i][0]) == -1) {
+				perror("close");
+			}
+		} else {
+			/*
+			 * Earlier workers' write ends were already closed in the parent before this
+			 * child was forked, so this child only inherits their read ends.
+			 */
+			if (close(pipes[i][0]) == -1) {
+				perror("close");
+			}
+		}
+	}
+}
+
+static void wait_for_children(pid_t child_pids[], int child_count) {
+	for (int i = 0; i < child_count; i++) {
+		int status;
+		while (waitpid(child_pids[i], &status, 0) == -1) {
+			if (errno == EINTR) {
+				continue;
+			}
+			perror("waitpid");
+			break;
+		}
+	}
+}
+
+static int parse_nonnegative_int(const char *value, const char *flag_name) {
+	char *endptr;
+	long parsed = strtol(value, &endptr, 10);
+
+	if (*value == '\0' || *endptr != '\0' || parsed < 0 || parsed > INT_MAX) {
+		fprintf(stderr, "Invalid value for %s: %s\n", flag_name, value);
+		exit(1);
+	}
+
+	return (int)parsed;
 }
 
 int main(int argc, char **argv) {
 	// Declare any new variables you need
 	if (argc < 2) {
-		fprintf(stderr, "Usage: %s [-f | -a | -rf | -ra] <file list>\n", argv[0]);
+		fprintf(stderr, "Usage: %s [-f | -a | -rf | -ra] [-i] [-m N] [-k K] <file list>\n", argv[0]);
 		exit(1);
 	}
 	int (*sort_func)(const void *, const void *) = compare_frequency;
 	char *filename = NULL;
+	bool ignore_case = false;
+	int min_count = 1;
+	int top_k = -1;
 
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "-f") == 0) {
@@ -145,9 +242,25 @@ int main(int argc, char **argv) {
 			sort_func = compare_frequency_reversed;
 		} else if (strcmp(argv[i], "-a") == 0) {
 			sort_func = compare_alphabetical;
-		}else if (strcmp(argv[i], "-ra") == 0) {
+		} else if (strcmp(argv[i], "-ra") == 0) {
 			sort_func = compare_alphabetical_reversed;
-		}else {
+		} else if (strcmp(argv[i], "-i") == 0) {
+			ignore_case = true;
+		} else if (strcmp(argv[i], "-m") == 0) {
+			if (i + 1 >= argc) {
+				fprintf(stderr, "Missing value after -m\n");
+				fprintf(stderr, "Usage: %s [-f | -a | -rf | -ra] [-i] [-m N] [-k K] <file list>\n", argv[0]);
+				exit(1);
+			}
+			min_count = parse_nonnegative_int(argv[++i], "-m");
+		} else if (strcmp(argv[i], "-k") == 0) {
+			if (i + 1 >= argc) {
+				fprintf(stderr, "Missing value after -k\n");
+				fprintf(stderr, "Usage: %s [-f | -a | -rf | -ra] [-i] [-m N] [-k K] <file list>\n", argv[0]);
+				exit(1);
+			}
+			top_k = parse_nonnegative_int(argv[++i], "-k");
+		} else {
 			filename = argv[i];
 		}
 	}
@@ -174,6 +287,12 @@ int main(int argc, char **argv) {
 	if (len == 0) {
 		fclose(files);
 		return 0;
+	}
+
+	if (len < 3) {
+		fprintf(stderr, "Error: file list must contain at least 3 input files.\n");
+		fclose(files);
+		exit(1);
 	}
 
 	char **filenames = malloc(sizeof(char *) * len);
@@ -219,23 +338,25 @@ int main(int argc, char **argv) {
 		pid_t result = fork();
 		if (result < 0) {
 			perror("fork");
+			close_pipe_pair(fd[j]);
+			for (int k = 0; k < j; k++) {
+				close(fd[k][0]);
+			}
 			free_filenames(filenames, len);
 			exit(1);
 		} else if (result == 0) {
-			// Child process only writes to the process, close reading end
-			close(fd[j][0]);
-			for (int k = 0; k < j; k++) {
-				close(fd[k][0]);
-			//	close(fd[k][1]);
-			}
+			close_child_pipe_ends(fd, j + 1, j);
 
 			// Now we can start making the word index for the child process
-			char **word_list = read_words(filenames[j]);
+			char **word_list = read_words(filenames[j], ignore_case);
+			if (word_list == NULL) {
+				send_child_error_and_exit(fd[j][1], filenames[j]);
+			}
 			Node *node_list = generate_node_family(word_list);
 			if (node_list == NULL && word_list[0] != NULL) {
 				deallocate_words(word_list);
-				close(fd[j][1]);
-				exit(1);
+				errno = ENOMEM;
+				send_child_error_and_exit(fd[j][1], filenames[j]);
 			}
 
 			char *output = convert_node_family(node_list);
@@ -243,31 +364,39 @@ int main(int argc, char **argv) {
 				perror("malloc");
 				deallocate_nodes(node_list);
 				deallocate_words(word_list);
-				close(fd[j][1]);
+				if (close(fd[j][1]) == -1) {
+					perror("close");
+				}
 				exit(1);
 			}
 
 			// Now we can send this word frequency to the parent process
-			if (write(fd[j][1], output, strlen(output)) == -1) {
+			if (!send_result_message(fd[j][1], output)) {
 				perror("write");
 				free(output);
 				deallocate_nodes(node_list);
 				deallocate_words(word_list);
-				close(fd[j][1]);
+				if (close(fd[j][1]) == -1) {
+					perror("close");
+				}
 				exit(1);
 			}
 
 			free(output);
 			deallocate_nodes(node_list);
 			deallocate_words(word_list);
-			close(fd[j][1]);
+			if (close(fd[j][1]) == -1) {
+				perror("close");
+			}
 			free_filenames(filenames, len);
 			exit(0);
 		} else {
 			// close the end of the pipe in the parent process
 			// we don't want open
 			child_pids[j] = result;
-			close(fd[j][1]);
+			if (close(fd[j][1]) == -1) {
+				perror("close");
+			}
 		}
 	}
 
@@ -275,8 +404,25 @@ int main(int argc, char **argv) {
 
 	// Parent collects each child's message and merges it into one result list.
 	for (int j = 0; j < len; j++) {
-		char *buffer = read_from_pipe(fd[j][0]);
-		close(fd[j][0]);
+		char *buffer = read_result_message(fd[j][0]);
+		if (close(fd[j][0]) == -1) {
+			perror("close");
+		}
+		if (buffer == NULL) {
+			fprintf(stderr, "Child %d sent an incomplete result\n", child_pids[j]);
+			wait_for_children(child_pids, len);
+			deallocate_nodes(global_list);
+			free_filenames(filenames, len);
+			exit(1);
+		}
+		if (strncmp(buffer, ERROR_PREFIX, strlen(ERROR_PREFIX)) == 0) {
+			fprintf(stderr, "%s\n", buffer + strlen(ERROR_PREFIX));
+			free(buffer);
+			wait_for_children(child_pids, len);
+			deallocate_nodes(global_list);
+			free_filenames(filenames, len);
+			exit(1);
+		}
 		merge_child_results(&global_list, buffer);
 		free(buffer);
 	}
@@ -307,6 +453,7 @@ int main(int argc, char **argv) {
 	Node **node_array = malloc(sizeof(Node *) * num_words_distinct);
 	if (node_array == NULL) {
 		perror("malloc");
+		wait_for_children(child_pids, len);
 		deallocate_nodes(global_list);
 		free_filenames(filenames, len);
 		exit(1);
@@ -320,9 +467,16 @@ int main(int argc, char **argv) {
 	
 	qsort(node_array, num_words_distinct, sizeof(Node *), sort_func);
 
-	
+	int printed = 0;
 	for (int i = 0; i < num_words_distinct; i++) {
+		if (node_array[i]->count < min_count) {
+			continue;
+		}
+		if (top_k >= 0 && printed >= top_k) {
+			break;
+		}
 		printf("%s %d\n", node_array[i]->word, node_array[i]->count);
+		printed++;
 	}
 
 	/*
@@ -333,6 +487,7 @@ int main(int argc, char **argv) {
 	*/
 
 	deallocate_nodes(global_list);
+	free(node_array);
 	free_filenames(filenames, len);
 	return 0;
 }

@@ -14,7 +14,7 @@ make
 ## Run
 
 ```sh
-./pwc [-f | -rf | -a | -ra] <filelist>
+./pwc [-f | -rf | -a | -ra] [-i] <filelist>
 ```
 
 Sorting options:
@@ -23,6 +23,7 @@ Sorting options:
 - `-rf`: sort by frequency ascending, then alphabetically
 - `-a`: sort alphabetically ascending
 - `-ra`: sort alphabetically descending
+- `-i`: treat words case-insensitively
 
 The `<filelist>` argument must be a text file containing one input filename per
 line.

@@ -175,11 +175,12 @@ static void close_child_pipe_ends(int pipes[][2], int initialized_count, int kee
 int main(int argc, char **argv) {
 	// Declare any new variables you need
 	if (argc < 2) {
-		fprintf(stderr, "Usage: %s [-f | -a | -rf | -ra] <file list>\n", argv[0]);
+		fprintf(stderr, "Usage: %s [-f | -a | -rf | -ra] [-i] <file list>\n", argv[0]);
 		exit(1);
 	}
 	int (*sort_func)(const void *, const void *) = compare_frequency;
 	char *filename = NULL;
+	bool ignore_case = false;
 
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "-f") == 0) {
@@ -188,9 +189,11 @@ int main(int argc, char **argv) {
 			sort_func = compare_frequency_reversed;
 		} else if (strcmp(argv[i], "-a") == 0) {
 			sort_func = compare_alphabetical;
-		}else if (strcmp(argv[i], "-ra") == 0) {
+		} else if (strcmp(argv[i], "-ra") == 0) {
 			sort_func = compare_alphabetical_reversed;
-		}else {
+		} else if (strcmp(argv[i], "-i") == 0) {
+			ignore_case = true;
+		} else {
 			filename = argv[i];
 		}
 	}
@@ -272,7 +275,7 @@ int main(int argc, char **argv) {
 			close_child_pipe_ends(fd, j + 1, j);
 
 			// Now we can start making the word index for the child process
-			char **word_list = read_words(filenames[j]);
+			char **word_list = read_words(filenames[j], ignore_case);
 			Node *node_list = generate_node_family(word_list);
 			if (node_list == NULL && word_list[0] != NULL) {
 				deallocate_words(word_list);

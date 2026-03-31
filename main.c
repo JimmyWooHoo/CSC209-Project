@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -172,15 +173,29 @@ static void close_child_pipe_ends(int pipes[][2], int initialized_count, int kee
 	}
 }
 
+static int parse_nonnegative_int(const char *value, const char *flag_name) {
+	char *endptr;
+	long parsed = strtol(value, &endptr, 10);
+
+	if (*value == '\0' || *endptr != '\0' || parsed < 0 || parsed > INT_MAX) {
+		fprintf(stderr, "Invalid value for %s: %s\n", flag_name, value);
+		exit(1);
+	}
+
+	return (int)parsed;
+}
+
 int main(int argc, char **argv) {
 	// Declare any new variables you need
 	if (argc < 2) {
-		fprintf(stderr, "Usage: %s [-f | -a | -rf | -ra] [-i] <file list>\n", argv[0]);
+		fprintf(stderr, "Usage: %s [-f | -a | -rf | -ra] [-i] [-m N] [-k K] <file list>\n", argv[0]);
 		exit(1);
 	}
 	int (*sort_func)(const void *, const void *) = compare_frequency;
 	char *filename = NULL;
 	bool ignore_case = false;
+	int min_count = 1;
+	int top_k = -1;
 
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "-f") == 0) {
@@ -193,6 +208,20 @@ int main(int argc, char **argv) {
 			sort_func = compare_alphabetical_reversed;
 		} else if (strcmp(argv[i], "-i") == 0) {
 			ignore_case = true;
+		} else if (strcmp(argv[i], "-m") == 0) {
+			if (i + 1 >= argc) {
+				fprintf(stderr, "Missing value after -m\n");
+				fprintf(stderr, "Usage: %s [-f | -a | -rf | -ra] [-i] [-m N] [-k K] <file list>\n", argv[0]);
+				exit(1);
+			}
+			min_count = parse_nonnegative_int(argv[++i], "-m");
+		} else if (strcmp(argv[i], "-k") == 0) {
+			if (i + 1 >= argc) {
+				fprintf(stderr, "Missing value after -k\n");
+				fprintf(stderr, "Usage: %s [-f | -a | -rf | -ra] [-i] [-m N] [-k K] <file list>\n", argv[0]);
+				exit(1);
+			}
+			top_k = parse_nonnegative_int(argv[++i], "-k");
 		} else {
 			filename = argv[i];
 		}
@@ -371,9 +400,16 @@ int main(int argc, char **argv) {
 	
 	qsort(node_array, num_words_distinct, sizeof(Node *), sort_func);
 
-	
+	int printed = 0;
 	for (int i = 0; i < num_words_distinct; i++) {
+		if (node_array[i]->count < min_count) {
+			continue;
+		}
+		if (top_k >= 0 && printed >= top_k) {
+			break;
+		}
 		printf("%s %d\n", node_array[i]->word, node_array[i]->count);
+		printed++;
 	}
 
 	/*

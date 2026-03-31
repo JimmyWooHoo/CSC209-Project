@@ -1,4 +1,6 @@
 #include <errno.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,7 +9,6 @@
 #include "node.h"
 
 #define LINE_LENGTH 256
-#define READ_CHUNK 256
 
 // function for alphabetical sort
 int compare_alphabetical(const void *a, const void *b) {
@@ -90,43 +91,85 @@ static void merge_child_results(Node **global_list, const char *buffer) {
 	free(copy);
 }
 
-static char *read_from_pipe(int fd) {
-	// Grow the buffer as needed so one child can send back any amount of text.
-	size_t capacity = READ_CHUNK + 1;
-	size_t used = 0;
-	char *buffer = malloc(capacity);
+static bool write_all(int fd, const void *buffer, size_t count) {
+	const char *cursor = buffer;
+	size_t total_written = 0;
+
+	while (total_written < count) {
+		ssize_t bytes_written = write(fd, cursor + total_written, count - total_written);
+		if (bytes_written < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			return false;
+		}
+		total_written += (size_t)bytes_written;
+	}
+
+	return true;
+}
+
+static bool read_all(int fd, void *buffer, size_t count) {
+	char *cursor = buffer;
+	size_t total_read = 0;
+
+	while (total_read < count) {
+		ssize_t bytes_read = read(fd, cursor + total_read, count - total_read);
+		if (bytes_read < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			return false;
+		}
+		if (bytes_read == 0) {
+			return false;
+		}
+		total_read += (size_t)bytes_read;
+	}
+
+	return true;
+}
+
+static bool send_result_message(int fd, const char *payload) {
+	uint32_t payload_len = (uint32_t)strlen(payload);
+	return write_all(fd, &payload_len, sizeof(payload_len))
+		&& write_all(fd, payload, payload_len);
+}
+
+static char *read_result_message(int fd) {
+	uint32_t payload_len;
+	if (!read_all(fd, &payload_len, sizeof(payload_len))) {
+		return NULL;
+	}
+
+	char *buffer = malloc((size_t)payload_len + 1);
 	if (buffer == NULL) {
 		perror("malloc");
 		exit(1);
 	}
 
-	while (1) {
-		ssize_t bytes_read = read(fd, buffer + used, capacity - used - 1);
-		if (bytes_read < 0) {
-			perror("read");
-			free(buffer);
-			exit(1);
-		}
-		if (bytes_read == 0) {
-			break;
-		}
-
-		used += (size_t) bytes_read;
-		// Double the buffer once it fills up to keep reads simple.
-		if (used == capacity - 1) {
-			capacity *= 2;
-			char *grown = realloc(buffer, capacity);
-			if (grown == NULL) {
-				perror("realloc");
-				free(buffer);
-				exit(1);
-			}
-			buffer = grown;
-		}
+	if (payload_len > 0 && !read_all(fd, buffer, payload_len)) {
+		free(buffer);
+		return NULL;
 	}
 
-	buffer[used] = '\0';
+	buffer[payload_len] = '\0';
 	return buffer;
+}
+
+static void close_pipe_pair(int pipe_fds[2]) {
+	close(pipe_fds[0]);
+	close(pipe_fds[1]);
+}
+
+static void close_child_pipe_ends(int pipes[][2], int initialized_count, int keep_index) {
+	for (int i = 0; i < initialized_count; i++) {
+		if (i == keep_index) {
+			close(pipes[i][0]);
+		} else {
+			close_pipe_pair(pipes[i]);
+		}
+	}
 }
 
 int main(int argc, char **argv) {
@@ -219,15 +262,14 @@ int main(int argc, char **argv) {
 		pid_t result = fork();
 		if (result < 0) {
 			perror("fork");
+			close_pipe_pair(fd[j]);
+			for (int k = 0; k < j; k++) {
+				close(fd[k][0]);
+			}
 			free_filenames(filenames, len);
 			exit(1);
 		} else if (result == 0) {
-			// Child process only writes to the process, close reading end
-			close(fd[j][0]);
-			for (int k = 0; k < j; k++) {
-				close(fd[k][0]);
-			//	close(fd[k][1]);
-			}
+			close_child_pipe_ends(fd, j + 1, j);
 
 			// Now we can start making the word index for the child process
 			char **word_list = read_words(filenames[j]);
@@ -248,7 +290,7 @@ int main(int argc, char **argv) {
 			}
 
 			// Now we can send this word frequency to the parent process
-			if (write(fd[j][1], output, strlen(output)) == -1) {
+			if (!send_result_message(fd[j][1], output)) {
 				perror("write");
 				free(output);
 				deallocate_nodes(node_list);
@@ -275,8 +317,14 @@ int main(int argc, char **argv) {
 
 	// Parent collects each child's message and merges it into one result list.
 	for (int j = 0; j < len; j++) {
-		char *buffer = read_from_pipe(fd[j][0]);
+		char *buffer = read_result_message(fd[j][0]);
 		close(fd[j][0]);
+		if (buffer == NULL) {
+			fprintf(stderr, "Child %d sent an incomplete result\n", child_pids[j]);
+			deallocate_nodes(global_list);
+			free_filenames(filenames, len);
+			exit(1);
+		}
 		merge_child_results(&global_list, buffer);
 		free(buffer);
 	}

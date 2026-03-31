@@ -144,7 +144,9 @@ static void send_child_error_and_exit(int fd, const char *filename) {
 	if (!send_result_message(fd, buffer)) {
 		perror("write");
 	}
-	close(fd);
+	if (close(fd) == -1) {
+		perror("close");
+	}
 	exit(1);
 }
 
@@ -170,16 +172,41 @@ static char *read_result_message(int fd) {
 }
 
 static void close_pipe_pair(int pipe_fds[2]) {
-	close(pipe_fds[0]);
-	close(pipe_fds[1]);
+	if (close(pipe_fds[0]) == -1) {
+		perror("close");
+	}
+	if (close(pipe_fds[1]) == -1) {
+		perror("close");
+	}
 }
 
 static void close_child_pipe_ends(int pipes[][2], int initialized_count, int keep_index) {
 	for (int i = 0; i < initialized_count; i++) {
 		if (i == keep_index) {
-			close(pipes[i][0]);
+			if (close(pipes[i][0]) == -1) {
+				perror("close");
+			}
 		} else {
-			close_pipe_pair(pipes[i]);
+			/*
+			 * Earlier workers' write ends were already closed in the parent before this
+			 * child was forked, so this child only inherits their read ends.
+			 */
+			if (close(pipes[i][0]) == -1) {
+				perror("close");
+			}
+		}
+	}
+}
+
+static void wait_for_children(pid_t child_pids[], int child_count) {
+	for (int i = 0; i < child_count; i++) {
+		int status;
+		while (waitpid(child_pids[i], &status, 0) == -1) {
+			if (errno == EINTR) {
+				continue;
+			}
+			perror("waitpid");
+			break;
 		}
 	}
 }
@@ -331,7 +358,9 @@ int main(int argc, char **argv) {
 				perror("malloc");
 				deallocate_nodes(node_list);
 				deallocate_words(word_list);
-				close(fd[j][1]);
+				if (close(fd[j][1]) == -1) {
+					perror("close");
+				}
 				exit(1);
 			}
 
@@ -341,21 +370,27 @@ int main(int argc, char **argv) {
 				free(output);
 				deallocate_nodes(node_list);
 				deallocate_words(word_list);
-				close(fd[j][1]);
+				if (close(fd[j][1]) == -1) {
+					perror("close");
+				}
 				exit(1);
 			}
 
 			free(output);
 			deallocate_nodes(node_list);
 			deallocate_words(word_list);
-			close(fd[j][1]);
+			if (close(fd[j][1]) == -1) {
+				perror("close");
+			}
 			free_filenames(filenames, len);
 			exit(0);
 		} else {
 			// close the end of the pipe in the parent process
 			// we don't want open
 			child_pids[j] = result;
-			close(fd[j][1]);
+			if (close(fd[j][1]) == -1) {
+				perror("close");
+			}
 		}
 	}
 
@@ -364,9 +399,12 @@ int main(int argc, char **argv) {
 	// Parent collects each child's message and merges it into one result list.
 	for (int j = 0; j < len; j++) {
 		char *buffer = read_result_message(fd[j][0]);
-		close(fd[j][0]);
+		if (close(fd[j][0]) == -1) {
+			perror("close");
+		}
 		if (buffer == NULL) {
 			fprintf(stderr, "Child %d sent an incomplete result\n", child_pids[j]);
+			wait_for_children(child_pids, len);
 			deallocate_nodes(global_list);
 			free_filenames(filenames, len);
 			exit(1);
@@ -374,6 +412,7 @@ int main(int argc, char **argv) {
 		if (strncmp(buffer, ERROR_PREFIX, strlen(ERROR_PREFIX)) == 0) {
 			fprintf(stderr, "%s\n", buffer + strlen(ERROR_PREFIX));
 			free(buffer);
+			wait_for_children(child_pids, len);
 			deallocate_nodes(global_list);
 			free_filenames(filenames, len);
 			exit(1);
@@ -408,6 +447,7 @@ int main(int argc, char **argv) {
 	Node **node_array = malloc(sizeof(Node *) * num_words_distinct);
 	if (node_array == NULL) {
 		perror("malloc");
+		wait_for_children(child_pids, len);
 		deallocate_nodes(global_list);
 		free_filenames(filenames, len);
 		exit(1);
@@ -441,6 +481,7 @@ int main(int argc, char **argv) {
 	*/
 
 	deallocate_nodes(global_list);
+	free(node_array);
 	free_filenames(filenames, len);
 	return 0;
 }

@@ -289,6 +289,12 @@ int main(int argc, char **argv) {
 		return 0;
 	}
 
+	if (len < 3) {
+		fprintf(stderr, "Error: file list must contain at least 3 input files.\n");
+		fclose(files);
+		exit(1);
+	}
+
 	char **filenames = malloc(sizeof(char *) * len);
 	if (filenames == NULL) {
 		perror("malloc");

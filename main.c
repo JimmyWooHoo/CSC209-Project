@@ -10,6 +10,7 @@
 #include "node.h"
 
 #define LINE_LENGTH 256
+#define ERROR_PREFIX "__ERROR__ "
 
 // function for alphabetical sort
 int compare_alphabetical(const void *a, const void *b) {
@@ -135,6 +136,16 @@ static bool send_result_message(int fd, const char *payload) {
 	uint32_t payload_len = (uint32_t)strlen(payload);
 	return write_all(fd, &payload_len, sizeof(payload_len))
 		&& write_all(fd, payload, payload_len);
+}
+
+static void send_child_error_and_exit(int fd, const char *filename) {
+	char buffer[LINE_LENGTH + 128];
+	snprintf(buffer, sizeof(buffer), "%s%s: %s", ERROR_PREFIX, filename, strerror(errno));
+	if (!send_result_message(fd, buffer)) {
+		perror("write");
+	}
+	close(fd);
+	exit(1);
 }
 
 static char *read_result_message(int fd) {
@@ -305,11 +316,14 @@ int main(int argc, char **argv) {
 
 			// Now we can start making the word index for the child process
 			char **word_list = read_words(filenames[j], ignore_case);
+			if (word_list == NULL) {
+				send_child_error_and_exit(fd[j][1], filenames[j]);
+			}
 			Node *node_list = generate_node_family(word_list);
 			if (node_list == NULL && word_list[0] != NULL) {
 				deallocate_words(word_list);
-				close(fd[j][1]);
-				exit(1);
+				errno = ENOMEM;
+				send_child_error_and_exit(fd[j][1], filenames[j]);
 			}
 
 			char *output = convert_node_family(node_list);
@@ -353,6 +367,13 @@ int main(int argc, char **argv) {
 		close(fd[j][0]);
 		if (buffer == NULL) {
 			fprintf(stderr, "Child %d sent an incomplete result\n", child_pids[j]);
+			deallocate_nodes(global_list);
+			free_filenames(filenames, len);
+			exit(1);
+		}
+		if (strncmp(buffer, ERROR_PREFIX, strlen(ERROR_PREFIX)) == 0) {
+			fprintf(stderr, "%s\n", buffer + strlen(ERROR_PREFIX));
+			free(buffer);
 			deallocate_nodes(global_list);
 			free_filenames(filenames, len);
 			exit(1);

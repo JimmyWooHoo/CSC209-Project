@@ -13,8 +13,7 @@ static void normalize_word(char *word) {
 char **read_words(const char *filename, bool ignore_case) {
 	FILE *fp = fopen(filename, "r");
 	if (fp == NULL) {
-		perror("fopen");
-		exit(1);
+		return NULL;
 	}
 
 	int count = 0;
@@ -24,11 +23,10 @@ char **read_words(const char *filename, bool ignore_case) {
 	}
 	rewind(fp);
 
-	char **words = malloc(sizeof(*words) * (count + 1));
+	char **words = calloc((size_t)count + 1, sizeof(*words));
 	if (words == NULL) {
-		perror("malloc");
 		fclose(fp);
-		exit(1);
+		return NULL;
 	}
 
 	int i = 0;
@@ -39,16 +37,14 @@ char **read_words(const char *filename, bool ignore_case) {
 
 		words[i] = malloc(strlen(str) + 1);
 		if (words[i] == NULL) {
-			perror("malloc");
 			fclose(fp);
 			deallocate_words(words);
-			exit(1);
+			return NULL;
 		}
 		strcpy(words[i], str);
 		i++;
 	}
 
-	words[count] = NULL;
 	fclose(fp);
 	return words;
 }

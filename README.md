@@ -5,6 +5,10 @@ It reads a list of input text files, spawns one worker process per file, and use
 pipes to return each worker's local word-count result to the parent. The parent
 merges the results, sorts them, applies optional filters, and prints the final output.
 
+## Demo Video
+
+Project demo video: https://youtu.be/_o4Pdgn_9TQ
+
 ## Overview
 
 This project focuses on process creation, pipe-based communication, concurrent
